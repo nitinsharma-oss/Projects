@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Stage — check in</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,800&family=IBM+Plex+Mono:wght@400;500&family=Instrument+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/stage.css">
+<style>
+  .tap { min-height: 100vh; display: grid; place-content: center; padding: 30px 22px; text-align: center; }
+  .tap-inner { max-width: 420px; display: grid; gap: 14px; justify-items: center; }
+  .tap h1 { font-size: 34px; }
+  .mark { width: 54px; height: 54px; border-radius: 50%; display: grid; place-content: center; font-size: 26px; color: #fff; }
+</style>
+</head>
+<body>
+<div class="tap">
+  <div class="tap-inner">
+    <div class="brand" style="margin-bottom:8px"><span class="lamp" data-on="false"></span> Stage</div>
+    <div id="body"><p class="mono muted">Checking you in…</p></div>
+  </div>
+</div>
+
+<script type="module">
+import { esc, el } from '/stage.js';
+
+const token = location.pathname.replace(/^\/c\//, '');
+
+const view = (mark, colour, title, sub) => `
+  <div class="mark" style="background:${colour};margin:0 auto 6px">${mark}</div>
+  <h1>${esc(title)}</h1>
+  <p class="muted" style="margin:0">${esc(sub)}</p>`;
+
+/* This page is reached by tapping a tag, so there's no session and no sign-in.
+   The signed token in the URL is the credential — that's what lets it work on
+   an iPhone with no app installed. */
+
+try {
+  const res = await fetch('/api/checkin', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ token }),
+  });
+  const data = await res.json();
+
+  if (!res.ok) {
+    el('body').innerHTML = view('!', 'var(--tally)', 'Couldn\u2019t check you in', data.error);
+  } else if (data.status === 'already_in') {
+    el('body').innerHTML = view('✓', 'var(--amber)', `You\u2019re already in, ${data.name.split(' ')[0]}`, data.session);
+  } else {
+    el('body').innerHTML = view('✓', 'var(--signal)', `You\u2019re in, ${data.name.split(' ')[0]}`, data.session);
+    document.querySelector('.lamp').dataset.on = 'true';
+  }
+} catch {
+  el('body').innerHTML = view('!', 'var(--tally)', 'No connection', 'Show this screen at the front desk and they\u2019ll check you in.');
+}
+</script>
+</body>
+</html>
