@@ -120,6 +120,66 @@ async function call(path, { method = 'GET', body, token } = {}) {
 
   check('admin deletes a session', (await call(`/api/admin/webinars/${newId}`, { method: 'DELETE', token: adminToken })).status === 200);
   check('deleted session is gone', (await call(`/api/webinars/${newId}`)).status === 404);
+
+  // --- NFC cards ---
+  const people = await call('/api/admin/people', { token: adminToken });
+  const marco = people.data.people.find((p) => p.email === 'marco@northwind.test');
+
+  const card = await call('/api/admin/cards', { method: 'POST', token: adminToken, body: { userId: marco.id, uid: '04:a1:b2:c3', label: 'Marco badge' } });
+  check('admin enrols a card', card.status === 201 && Boolean(card.data.card.token));
+  check('UID is normalised to plain uppercase hex', card.data.card.uid === '04A1B2C3');
+  check('tap URL is built from the token', card.data.card.tapUrl.includes(`/c/${card.data.card.token}`));
+  const cardToken = card.data.card.token;
+  const cardId = card.data.card.id;
+
+  check('duplicate UID is refused',
+    (await call('/api/admin/cards', { method: 'POST', token: adminToken, body: { userId: marco.id, uid: '04-A1-B2-C3' } })).status === 409);
+  check('enrolling without a holder is refused',
+    (await call('/api/admin/cards', { method: 'POST', token: adminToken, body: { uid: 'DEADBEEF' } })).status === 400);
+  check('attendee cannot enrol cards',
+    (await call('/api/admin/cards', { method: 'POST', token: userToken, body: { userId: marco.id } })).status === 403);
+
+  // token check-in needs no session at all — this is the iPhone-with-no-app path
+  const tap = await call('/api/checkin', { method: 'POST', body: { token: cardToken } });
+  check('tapping the tag checks the holder in', tap.status === 200 && tap.data.name === 'Marco Ferretti');
+  check('tap reports which session it counted for', Boolean(tap.data.session));
+
+  const tapAgain = await call('/api/checkin', { method: 'POST', body: { token: cardToken } });
+  check('a second tap is reported, not an error', tapAgain.status === 200 && tapAgain.data.status === 'already_in');
+
+  check('a forged token is rejected',
+    (await call('/api/checkin', { method: 'POST', body: { token: `${cardId}.forgedsignature000000` } })).status === 404);
+  check('an unknown card id is rejected',
+    (await call('/api/checkin', { method: 'POST', body: { token: 'card_doesnotexist.aaaaaaaaaaaaaaaaaaaaaa' } })).status === 404);
+  check('an empty check-in body is rejected',
+    (await call('/api/checkin', { method: 'POST', body: {} })).status === 400);
+
+  // UID check-in is weaker, so it must come from a signed-in admin
+  check('anonymous UID check-in is refused',
+    (await call('/api/checkin', { method: 'POST', body: { uid: '04A1B2C3' } })).status === 403);
+  check('attendee UID check-in is refused',
+    (await call('/api/checkin', { method: 'POST', body: { uid: '04A1B2C3' }, token: userToken })).status === 403);
+  const byUid = await call('/api/checkin', { method: 'POST', body: { uid: '04 a1 b2 c3' }, token: adminToken });
+  check('admin checks in by card number, separators ignored', byUid.status === 200 && byUid.data.name === 'Marco Ferretti');
+  check('an unenrolled card number is reported',
+    (await call('/api/checkin', { method: 'POST', body: { uid: 'FFFFFFFF' }, token: adminToken })).status === 404);
+
+  // walk-in: someone with a card but no seat
+  const stranger = await call('/api/auth/signup', { method: 'POST', body: { name: 'Walk In', email: 'walkin@t.test', password: 'password123' } });
+  const strangerCard = await call('/api/admin/cards', { method: 'POST', token: adminToken, body: { userId: stranger.data.user.id } });
+  const walk = await call('/api/checkin', { method: 'POST', body: { token: strangerCard.data.card.token } });
+  check('a cardholder with no seat is admitted as a walk-in', walk.status === 200 && walk.data.status === 'walk_in');
+  check('walk-in is flagged as not holding a seat', walk.data.seatHeld === false);
+
+  check('the active session is reported for the station',
+    Boolean((await call('/api/checkin/session')).data.session));
+
+  check('admin revokes a card', (await call(`/api/admin/cards/${cardId}`, { method: 'DELETE', token: adminToken })).status === 200);
+  const revoked = await call('/api/checkin', { method: 'POST', body: { token: cardToken } });
+  check('a revoked card stops working', revoked.status === 403);
+
+  check('the tap landing page is served', (await call(`/c/${cardToken}`)).status === 200);
+
   check('unknown endpoint returns JSON 404', (await call('/api/nope')).status === 404);
 
   server.close();
