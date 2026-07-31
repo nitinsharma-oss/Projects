@@ -1,71 +1,46 @@
 'use strict';
-const crypto = require('crypto');
-const db = require('./db');
+const express = require('express');
+const db = require('../db');
+const { hashPassword, verifyPassword, issueToken, requireAuth, publicUser } = require('../auth');
 
-const SECRET = process.env.SESSION_SECRET || 'dev-secret-change-me';
-const TOKEN_TTL_MS = 1000 * 60 * 60 * 12; // 12 hours
+const router = express.Router();
+const normalise = (email) => String(email || '').trim().toLowerCase();
 
-/* ---------- passwords (scrypt) ---------- */
-
-function hashPassword(password) {
-  const salt = crypto.randomBytes(16).toString('hex');
-  const derived = crypto.scryptSync(password, salt, 64).toString('hex');
-  return `${salt}:${derived}`;
-}
-
-function verifyPassword(password, stored) {
-  const [salt, derived] = String(stored).split(':');
-  if (!salt || !derived) return false;
-  const candidate = crypto.scryptSync(password, salt, 64);
-  const expected = Buffer.from(derived, 'hex');
-  return candidate.length === expected.length && crypto.timingSafeEqual(candidate, expected);
-}
-
-/* ---------- tokens (HMAC, no external deps) ---------- */
-
-const b64 = (obj) => Buffer.from(JSON.stringify(obj)).toString('base64url');
-const sign = (payload) => crypto.createHmac('sha256', SECRET).update(payload).digest('base64url');
-
-function issueToken(user) {
-  const body = b64({ sub: user.id, role: user.role, exp: Date.now() + TOKEN_TTL_MS });
-  return `${body}.${sign(body)}`;
-}
-
-function readToken(token) {
-  if (typeof token !== 'string' || !token.includes('.')) return null;
-  const [body, signature] = token.split('.');
-  const expected = sign(body);
-  if (signature.length !== expected.length) return null;
-  if (!crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expected))) return null;
-  try {
-    const claims = JSON.parse(Buffer.from(body, 'base64url').toString());
-    if (!claims.exp || claims.exp < Date.now()) return null;
-    return claims;
-  } catch {
-    return null;
+router.post('/signup', (req, res) => {
+  const { name, email, password, company } = req.body || {};
+  if (!name || !email || !password) {
+    return res.status(400).json({ error: 'Name, email and password are all required.' });
   }
-}
+  if (String(password).length < 8) {
+    return res.status(400).json({ error: 'Password needs at least 8 characters.' });
+  }
+  if (db.data.users.some((u) => u.email === normalise(email))) {
+    return res.status(409).json({ error: 'That email is already registered. Sign in instead.' });
+  }
 
-/* ---------- middleware ---------- */
+  const user = {
+    id: db.id('usr'),
+    name: String(name).trim(),
+    email: normalise(email),
+    company: String(company || '').trim(),
+    passwordHash: hashPassword(password),
+    role: 'user',
+    createdAt: new Date().toISOString(),
+  };
+  db.data.users.push(user);
+  db.save();
+  res.status(201).json({ token: issueToken(user), user: publicUser(user) });
+});
 
-function attachUser(req, _res, next) {
-  const header = req.get('authorization') || '';
-  const claims = header.startsWith('Bearer ') ? readToken(header.slice(7)) : null;
-  req.user = claims ? db.data.users.find((u) => u.id === claims.sub) || null : null;
-  next();
-}
+router.post('/signin', (req, res) => {
+  const { email, password } = req.body || {};
+  const user = db.data.users.find((u) => u.email === normalise(email));
+  if (!user || !verifyPassword(String(password || ''), user.passwordHash)) {
+    return res.status(401).json({ error: 'That email and password don\u2019t match an account.' });
+  }
+  res.json({ token: issueToken(user), user: publicUser(user) });
+});
 
-function requireAuth(req, res, next) {
-  if (!req.user) return res.status(401).json({ error: 'Sign in to continue.' });
-  next();
-}
+router.get('/me', requireAuth, (req, res) => res.json({ user: publicUser(req.user) }));
 
-function requireAdmin(req, res, next) {
-  if (!req.user) return res.status(401).json({ error: 'Sign in to continue.' });
-  if (req.user.role !== 'admin') return res.status(403).json({ error: 'This area is for admins only.' });
-  next();
-}
-
-const publicUser = (u) => u && ({ id: u.id, name: u.name, email: u.email, role: u.role, company: u.company || '' });
-
-module.exports = { hashPassword, verifyPassword, issueToken, attachUser, requireAuth, requireAdmin, publicUser };
+module.exports = router;
