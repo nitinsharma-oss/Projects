@@ -1,0 +1,201 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Stage — my sessions</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,800&family=IBM+Plex+Mono:wght@400;500&family=Instrument+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/stage.css">
+</head>
+<body>
+<div class="shell">
+  <aside class="sidebar">
+    <div class="brand"><span class="lamp" data-on="false"></span> Stage</div>
+    <nav class="nav" id="nav">
+      <button data-view="next" aria-current="true">My sessions <span class="count" id="c-next"></span></button>
+      <button data-view="browse">Browse <span class="count" id="c-browse"></span></button>
+      <button data-view="replays">Replays <span class="count" id="c-replays"></span></button>
+    </nav>
+    <div class="sidebar-foot">
+      <div class="who"><strong id="who-name"></strong><span id="who-org" class="mono"></span></div>
+      <button class="btn ghost small" id="signout" style="color:#C6CAD4;border-color:#3A3F4B">Sign out</button>
+    </div>
+  </aside>
+
+  <main class="main">
+    <div class="page-head">
+      <span class="eyebrow" id="crumb">My sessions</span>
+      <h1 id="title">Up next</h1>
+    </div>
+
+    <div class="rail" id="rail"></div>
+    <div id="alert"></div>
+    <div class="filters" id="filters" hidden>
+      <input id="search" placeholder="Search sessions, hosts or topics" style="max-width:320px">
+    </div>
+    <div class="grid" id="list">Loading…</div>
+  </main>
+</div>
+
+<script type="module">
+import { api, session, requireSession, renderRail, startRailClock, fmtDate, fmtTime, countdown, esc, el, notify } from '/stage.js';
+
+let user = null;
+let view = 'next';
+let mine = [];
+let catalogue = [];
+let query = '';
+
+const stateLabel = { live: 'On air', scheduled: 'Scheduled', ended: 'Ended', draft: 'Draft', cancelled: 'Cancelled' };
+
+async function load() {
+  const [{ registrations }, { webinars }] = await Promise.all([
+    api('/me/registrations'),
+    api('/webinars'),
+  ]);
+  mine = registrations;
+  catalogue = webinars;
+
+  el('c-next').textContent = mine.filter((w) => w.state !== 'ended').length || '';
+  el('c-browse').textContent = catalogue.filter((w) => w.state !== 'ended' && !w.isRegistered).length || '';
+  el('c-replays').textContent = mine.filter((w) => w.state === 'ended').length || '';
+
+  renderRail(el('rail'), mine, { label: 'Your day' });
+  render();
+}
+
+function card(w) {
+  const seats = w.seatsLeft === null ? 'Unlimited seats'
+    : w.seatsLeft === 0 ? 'Full'
+    : `${w.seatsLeft} seats left`;
+
+  const actions = [];
+  if (w.state === 'live' && w.isRegistered) {
+    actions.push(`<button class="btn live" data-join="${w.id}">Join the room</button>`);
+  } else if (w.state === 'live' && !w.isRegistered) {
+    actions.push(`<button class="btn" data-register="${w.id}">Register and join</button>`);
+  } else if (w.state === 'scheduled' && w.isRegistered) {
+    actions.push(`<button class="btn ghost" data-cancel="${w.id}">Give up seat</button>`);
+  } else if (w.state === 'scheduled') {
+    actions.push(`<button class="btn" data-register="${w.id}" ${w.seatsLeft === 0 ? 'disabled' : ''}>${w.seatsLeft === 0 ? 'Full' : 'Save my seat'}</button>`);
+  } else if (w.state === 'ended' && w.recordingUrl) {
+    actions.push(`<a class="btn ghost" href="${esc(w.recordingUrl)}" target="_blank" rel="noopener">Watch the replay</a>`);
+  }
+
+  return `
+    <article class="card" data-state="${w.state}">
+      <div class="row-between">
+        <h3>${esc(w.title)}</h3>
+        <span class="badge" data-state="${w.state}">${stateLabel[w.state]}</span>
+      </div>
+      <p class="desc">${esc(w.description)}</p>
+      <div class="meta">
+        <span>${fmtDate(w.startsAt)} · ${fmtTime(w.startsAt)}</span>
+        <span>${w.durationMin} min</span>
+        <span>${esc(w.host)}</span>
+        ${w.state === 'scheduled' ? `<span>${countdown(w.startsAt)}</span>` : ''}
+        ${w.state === 'scheduled' && !w.isRegistered ? `<span>${seats}</span>` : ''}
+        ${w.isRegistered && w.state !== 'ended' ? '<span class="badge solid-signal">Seat held</span>' : ''}
+        ${w.state === 'ended' && w.attended ? `<span>Watched ${w.watchedMin || 0} min</span>` : ''}
+      </div>
+      ${actions.length ? `<div class="row">${actions.join('')}</div>` : ''}
+    </article>`;
+}
+
+function render() {
+  const heads = {
+    next: ['My sessions', 'Up next'],
+    browse: ['Browse', 'What\u2019s coming up'],
+    replays: ['Replays', 'Watch again'],
+  };
+  el('crumb').textContent = heads[view][0];
+  el('title').textContent = heads[view][1];
+  el('filters').hidden = view !== 'browse';
+
+  let rows;
+  if (view === 'next') rows = mine.filter((w) => w.state !== 'ended');
+  else if (view === 'replays') rows = mine.filter((w) => w.state === 'ended');
+  else {
+    const q = query.toLowerCase();
+    rows = catalogue
+      .filter((w) => w.state !== 'ended')
+      .filter((w) => !q || `${w.title} ${w.description} ${w.host} ${w.tags.join(' ')}`.toLowerCase().includes(q));
+  }
+
+  rows.sort((a, b) => (a.state === 'live' ? -1 : b.state === 'live' ? 1 : 0) || new Date(a.startsAt) - new Date(b.startsAt));
+
+  const empties = {
+    next: ['No seats held yet', 'Browse the schedule and save a seat — you\u2019ll get the room link here.', 'browse'],
+    browse: [query ? 'Nothing matches that search' : 'No sessions scheduled', query ? 'Try a shorter search term.' : 'New sessions appear here as soon as they\u2019re published.', null],
+    replays: ['No replays yet', 'Sessions you attend show up here once they finish.', 'next'],
+  };
+
+  el('list').innerHTML = rows.length
+    ? rows.map(card).join('')
+    : `<div class="empty">
+        <strong>${esc(empties[view][0])}</strong>
+        <span>${esc(empties[view][1])}</span>
+        ${empties[view][2] ? `<button class="btn ghost" data-goto="${empties[view][2]}">Go to ${empties[view][2] === 'browse' ? 'browse' : 'my sessions'}</button>` : ''}
+      </div>`;
+}
+
+/* ---------- events ---------- */
+
+el('list').addEventListener('click', async (e) => {
+  const btn = e.target.closest('button, a');
+  if (!btn) return;
+  notify(el('alert'), '');
+
+  try {
+    if (btn.dataset.goto) return switchView(btn.dataset.goto);
+    if (btn.dataset.register) {
+      btn.disabled = true;
+      await api(`/webinars/${btn.dataset.register}/register`, { method: 'POST' });
+      notify(el('alert'), 'Seat saved. The room link appears here 15 minutes before the start.', 'ok');
+      await load();
+    }
+    if (btn.dataset.cancel) {
+      btn.disabled = true;
+      await api(`/webinars/${btn.dataset.cancel}/register`, { method: 'DELETE' });
+      await load();
+    }
+    if (btn.dataset.join) {
+      const { joinUrl } = await api(`/webinars/${btn.dataset.join}/join`, { method: 'POST' });
+      window.open(joinUrl, '_blank', 'noopener');
+      await load();
+    }
+  } catch (err) {
+    notify(el('alert'), err.message);
+    await load();
+  }
+});
+
+function switchView(next) {
+  view = next;
+  document.querySelectorAll('#nav button').forEach((b) => b.setAttribute('aria-current', String(b.dataset.view === next)));
+  render();
+}
+
+el('nav').addEventListener('click', (e) => {
+  const btn = e.target.closest('button');
+  if (btn) switchView(btn.dataset.view);
+});
+
+el('search').addEventListener('input', (e) => { query = e.target.value; render(); });
+el('signout').onclick = () => session.signOut();
+
+/* ---------- boot ---------- */
+
+user = await requireSession();
+if (user) {
+  el('who-name').textContent = user.name;
+  el('who-org').textContent = user.company || user.email;
+  await load();
+  startRailClock(() => renderRail(el('rail'), mine, { label: 'Your day' }));
+  setInterval(load, 60_000); // keep live states honest without a refresh
+}
+</script>
+</body>
+</html>
