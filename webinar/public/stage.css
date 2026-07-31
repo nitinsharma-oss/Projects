@@ -25,6 +25,10 @@
 
 * { box-sizing: border-box; }
 
+/* Component display rules below (label, .row, .grid) outrank the browser's own
+   [hidden] rule, so hidden elements would stay visible without this. */
+[hidden] { display: none !important; }
+
 html, body { height: 100%; }
 
 body {
