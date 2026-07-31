@@ -1,0 +1,214 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Stage — check-in station</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,800&family=IBM+Plex+Mono:wght@400;500&family=Instrument+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/stage.css">
+<style>
+  .station { max-width: 720px; margin: 0 auto; padding: 26px 20px 60px; }
+  .target {
+    border: 2px dashed var(--rule);
+    border-radius: var(--radius);
+    padding: 40px 24px;
+    text-align: center;
+    display: grid;
+    gap: 8px;
+    background: var(--panel);
+  }
+  .target[data-result='checked_in'] { border-style: solid; border-color: var(--signal); background: rgba(23,99,94,.06); }
+  .target[data-result='walk_in'] { border-style: solid; border-color: var(--violet); background: rgba(75,63,152,.06); }
+  .target[data-result='already_in'] { border-style: solid; border-color: var(--amber); background: rgba(168,113,10,.06); }
+  .target[data-result='error'] { border-style: solid; border-color: var(--tally); background: rgba(220,58,40,.06); }
+  .target .headline { font-family: var(--display); font-size: 34px; font-weight: 700; letter-spacing: -0.03em; line-height: 1.1; }
+  .target .sub { color: var(--ink-soft); }
+  .feed { max-height: 300px; overflow: auto; }
+  .listening { display: inline-flex; align-items: center; gap: 7px; }
+</style>
+</head>
+<body>
+<div class="station">
+  <div class="row-between" style="margin-bottom:18px">
+    <div class="stack" style="gap:4px">
+      <span class="eyebrow">Check-in station</span>
+      <h1 id="session-title">Loading…</h1>
+    </div>
+    <a class="btn ghost small" href="/admin">Back to admin</a>
+  </div>
+
+  <div id="alert"></div>
+
+  <div class="target" id="target" style="margin-bottom:16px">
+    <div class="headline" id="headline">Tap a card</div>
+    <div class="sub" id="sub">Hold the card against the reader.</div>
+  </div>
+
+  <div class="panel stack" style="margin-bottom:16px">
+    <div class="row-between">
+      <span class="eyebrow">Input</span>
+      <span class="mono listening" id="listening"></span>
+    </div>
+    <div class="row" style="flex-wrap:wrap">
+      <button class="btn" id="nfc-start" hidden>Scan with this phone</button>
+      <input id="manual" class="mono" placeholder="Or type the card number and press Enter" style="flex:1;min-width:240px">
+    </div>
+    <p class="muted" style="font-size:13px;margin:0" id="hint"></p>
+  </div>
+
+  <div class="panel">
+    <div class="row-between" style="margin-bottom:12px">
+      <span class="eyebrow">Recent taps</span>
+      <span class="mono muted" id="tally-count">0</span>
+    </div>
+    <div class="feed" id="feed"></div>
+  </div>
+</div>
+
+<script type="module">
+import { api, requireSession, fmtTime, esc, el, notify } from '/stage.js';
+
+let sessionId = null;
+const feed = [];
+
+/* ---------- feedback ---------- */
+
+const COPY = {
+  checked_in: (r) => [r.name, `Checked in to ${r.session}.`],
+  walk_in: (r) => [r.name, `Walk-in — seat created for ${r.session}.`],
+  already_in: (r) => [r.name, 'Already checked in for this session.'],
+};
+
+let resetTimer = null;
+
+function show(result, error) {
+  clearTimeout(resetTimer);
+  const t = el('target');
+
+  if (error) {
+    t.dataset.result = 'error';
+    el('headline').textContent = 'Not recognised';
+    el('sub').textContent = error;
+  } else {
+    const [headline, sub] = COPY[result.status](result);
+    t.dataset.result = result.status;
+    el('headline').textContent = headline;
+    el('sub').textContent = sub;
+    feed.unshift({ ...result, when: new Date().toISOString() });
+    renderFeed();
+  }
+
+  // Clear after a few seconds so the next person doesn't see the last one's name.
+  resetTimer = setTimeout(() => {
+    delete t.dataset.result;
+    el('headline').textContent = 'Tap a card';
+    el('sub').textContent = 'Hold the card against the reader.';
+  }, 4500);
+}
+
+function renderFeed() {
+  el('tally-count').textContent = feed.length;
+  el('feed').innerHTML = feed.length
+    ? `<table><tbody>${feed.slice(0, 40).map((r) => `<tr>
+        <td>${esc(r.name)}</td>
+        <td class="muted">${esc(r.company) || '—'}</td>
+        <td><span class="badge" data-state="${r.status === 'already_in' ? 'draft' : r.status === 'walk_in' ? 'ended' : 'scheduled'}">${
+          r.status === 'already_in' ? 'repeat' : r.status === 'walk_in' ? 'walk-in' : 'in'}</span></td>
+        <td class="mono">${fmtTime(r.when)}</td>
+      </tr>`).join('')}</tbody></table>`
+    : '<p class="muted" style="margin:0;font-size:14px">Taps appear here as people arrive.</p>';
+}
+
+/* ---------- submit ---------- */
+
+let busy = false;
+
+async function submitUid(uid) {
+  if (busy || !uid) return;
+  busy = true;
+  try {
+    const result = await api('/checkin', { method: 'POST', body: { uid, sessionId } });
+    show(result);
+  } catch (err) {
+    show(null, err.message);
+  } finally {
+    busy = false;
+  }
+}
+
+/* ---------- input path 1: keyboard-wedge USB reader ----------
+   Most desk readers present as a keyboard: they type the UID then press Enter.
+   Buffering keystrokes globally means it works with no driver and no config. */
+
+let buffer = '';
+let lastKey = 0;
+
+document.addEventListener('keydown', (e) => {
+  if (e.target === el('manual')) return;      // typed input has its own handler
+  const now = Date.now();
+  if (now - lastKey > 500) buffer = '';        // a human pause means a new scan
+  lastKey = now;
+
+  if (e.key === 'Enter') {
+    const uid = buffer.trim();
+    buffer = '';
+    if (uid) submitUid(uid);
+  } else if (e.key.length === 1) {
+    buffer += e.key;
+  }
+});
+
+el('manual').addEventListener('keydown', (e) => {
+  if (e.key !== 'Enter') return;
+  const uid = el('manual').value.trim();
+  el('manual').value = '';
+  submitUid(uid);
+});
+
+/* ---------- input path 2: Web NFC (Chrome on Android) ----------
+   Needs a secure context: HTTPS, or http://localhost. A LAN IP won't qualify,
+   which is the usual reason this silently does nothing during development. */
+
+const nfcSupported = 'NDEFReader' in window;
+
+el('hint').textContent = nfcSupported
+  ? 'This device can scan cards directly. A USB desk reader also works — it types the card number for you.'
+  : 'No NFC in this browser (Web NFC is Chrome on Android only). Use a USB desk reader, which types the card number, or enter it by hand.';
+
+if (nfcSupported) {
+  el('nfc-start').hidden = false;
+  el('nfc-start').onclick = async () => {
+    try {
+      const reader = new NDEFReader();
+      await reader.scan();                     // must follow a user gesture
+      el('nfc-start').hidden = true;
+      el('listening').innerHTML = '<span class="lamp" data-on="true" style="background:var(--tally)"></span> listening for taps';
+      reader.onreading = ({ serialNumber }) => submitUid(serialNumber);
+      reader.onreadingerror = () => show(null, 'Couldn\u2019t read that card. Try again more slowly.');
+    } catch (err) {
+      notify(el('alert'), `NFC couldn\u2019t start: ${err.message}. Web NFC needs HTTPS or localhost.`);
+    }
+  };
+}
+
+/* ---------- boot ---------- */
+
+const user = await requireSession({ admin: true });
+if (user) {
+  renderFeed();
+  const load = async () => {
+    const { session } = await api('/checkin/session');
+    sessionId = session?.id || null;
+    el('session-title').textContent = session ? session.title : 'Nothing on air';
+    if (!session) notify(el('alert'), 'No session is live, so taps won\u2019t be recorded yet.', 'error');
+    else notify(el('alert'), '');
+  };
+  await load();
+  setInterval(load, 30_000);
+  el('manual').focus();
+}
+</script>
+</body>
+</html>
