@@ -6,7 +6,7 @@ const crypto = require('crypto');
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, '..', 'data');
 const DATA_FILE = path.join(DATA_DIR, 'store.json');
 
-const EMPTY = { users: [], webinars: [], registrations: [] };
+const EMPTY = { users: [], webinars: [], registrations: [], cards: [] };
 
 let cache = null;
 let writeQueue = Promise.resolve();
