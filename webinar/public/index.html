@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Stage — sign in</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,800&family=IBM+Plex+Mono:wght@400;500&family=Instrument+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/stage.css">
+</head>
+<body>
+<div class="auth">
+  <section class="auth-side">
+    <div class="brand"><span class="lamp" data-on="false"></span> Stage</div>
+    <div class="stack">
+      <h1>Run the session,<br>not the spreadsheet.</h1>
+      <p>Schedule webinars, hold seats, open the room on time, and see who actually showed up — in one place.</p>
+    </div>
+    <div class="demo-keys">
+      <div>DEMO ACCOUNTS</div>
+      <div>admin@stage.test · password123</div>
+      <div>marco@northwind.test · password123</div>
+    </div>
+  </section>
+
+  <section class="auth-form-wrap">
+    <div class="auth-form">
+      <div class="stack" style="gap:4px">
+        <span class="eyebrow" id="mode-label">Sign in</span>
+        <h2 id="heading">Welcome back</h2>
+      </div>
+
+      <div id="alert"></div>
+
+      <label data-signup hidden><span>Name</span><input id="name" autocomplete="name"></label>
+      <label data-signup hidden><span>Company</span><input id="company" autocomplete="organization"></label>
+      <label><span>Email</span><input id="email" type="email" autocomplete="email"></label>
+      <label><span>Password</span><input id="password" type="password" autocomplete="current-password"></label>
+
+      <button class="btn" id="submit">Sign in</button>
+
+      <p class="switch">
+        <span id="switch-text">New here?</span>
+        <button id="switch" type="button">Create an account</button>
+      </p>
+    </div>
+  </section>
+</div>
+
+<script type="module">
+import { api, session, el, notify } from '/stage.js';
+
+let mode = 'signin';
+
+function setMode(next) {
+  mode = next;
+  const signup = mode === 'signup';
+  document.querySelectorAll('[data-signup]').forEach((n) => { n.hidden = !signup; });
+  el('mode-label').textContent = signup ? 'Create account' : 'Sign in';
+  el('heading').textContent = signup ? 'Set up your seat' : 'Welcome back';
+  el('submit').textContent = signup ? 'Create account' : 'Sign in';
+  el('switch-text').textContent = signup ? 'Already have an account?' : 'New here?';
+  el('switch').textContent = signup ? 'Sign in' : 'Create an account';
+  el('password').autocomplete = signup ? 'new-password' : 'current-password';
+  notify(el('alert'), '');
+}
+
+el('switch').onclick = () => setMode(mode === 'signin' ? 'signup' : 'signin');
+
+async function submit() {
+  const btn = el('submit');
+  btn.disabled = true;
+  notify(el('alert'), '');
+  try {
+    const body = mode === 'signup'
+      ? { name: el('name').value, company: el('company').value, email: el('email').value, password: el('password').value }
+      : { email: el('email').value, password: el('password').value };
+    const { token, user } = await api(`/auth/${mode === 'signup' ? 'signup' : 'signin'}`, { method: 'POST', body });
+    session.token = token;
+    location.href = user.role === 'admin' ? '/admin' : '/dashboard';
+  } catch (err) {
+    notify(el('alert'), err.message);
+    btn.disabled = false;
+  }
+}
+
+el('submit').onclick = submit;
+document.querySelectorAll('input').forEach((i) => {
+  i.addEventListener('keydown', (e) => { if (e.key === 'Enter') submit(); });
+});
+
+if (session.token) {
+  api('/auth/me')
+    .then(({ user }) => { location.href = user.role === 'admin' ? '/admin' : '/dashboard'; })
+    .catch(() => { session.token = null; });
+}
+</script>
+</body>
+</html>
