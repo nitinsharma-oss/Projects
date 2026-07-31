@@ -1,0 +1,317 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Stage — control room</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,800&family=IBM+Plex+Mono:wght@400;500&family=Instrument+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/stage.css">
+</head>
+<body>
+<div class="shell">
+  <aside class="sidebar">
+    <div class="brand"><span class="lamp" data-on="false"></span> Stage</div>
+    <nav class="nav" id="nav">
+      <button data-view="overview" aria-current="true">Control room</button>
+      <button data-view="sessions">Sessions <span class="count" id="c-sessions"></span></button>
+      <button data-view="people">People <span class="count" id="c-people"></span></button>
+    </nav>
+    <div class="sidebar-foot">
+      <div class="who"><strong id="who-name"></strong><span class="mono">Admin</span></div>
+      <button class="btn ghost small" id="signout" style="color:#C6CAD4;border-color:#3A3F4B">Sign out</button>
+    </div>
+  </aside>
+
+  <main class="main">
+    <div class="row-between page-head">
+      <div class="stack" style="gap:5px">
+        <span class="eyebrow" id="crumb">Control room</span>
+        <h1 id="title">Today</h1>
+      </div>
+      <button class="btn" id="new-session">Schedule a session</button>
+    </div>
+
+    <div class="rail" id="rail"></div>
+    <div id="alert"></div>
+    <div id="body">Loading…</div>
+  </main>
+</div>
+
+<dialog id="editor">
+  <form method="dialog" class="dialog-body" id="editor-form">
+    <div class="stack" style="gap:4px">
+      <span class="eyebrow" id="editor-eyebrow">New session</span>
+      <h2 id="editor-title">Schedule a session</h2>
+    </div>
+    <div id="editor-alert"></div>
+    <label><span>Title</span><input id="f-title" required></label>
+    <label><span>What it covers</span><textarea id="f-description"></textarea></label>
+    <div class="grid grid-2">
+      <label><span>Host</span><input id="f-host"></label>
+      <label><span>Topics (comma separated)</span><input id="f-tags"></label>
+      <label><span>Starts</span><input id="f-startsAt" type="datetime-local" required></label>
+      <label><span>Length (minutes)</span><input id="f-durationMin" type="number" min="5" value="60"></label>
+      <label><span>Seats (blank = unlimited)</span><input id="f-capacity" type="number" min="0"></label>
+      <label><span>Status</span>
+        <select id="f-status">
+          <option value="draft">Draft — not visible to anyone</option>
+          <option value="scheduled">Published — open for registration</option>
+          <option value="cancelled">Cancelled</option>
+        </select>
+      </label>
+    </div>
+    <label><span>Room link</span><input id="f-joinUrl" placeholder="https://"></label>
+    <label><span>Replay link (after the session)</span><input id="f-recordingUrl" placeholder="https://"></label>
+    <div class="dialog-foot">
+      <button class="btn ghost" type="button" id="editor-cancel">Cancel</button>
+      <button class="btn" type="button" id="editor-save">Save session</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="registrants">
+  <div class="dialog-body">
+    <div class="row-between">
+      <div class="stack" style="gap:4px">
+        <span class="eyebrow">Registrants</span>
+        <h2 id="reg-title"></h2>
+      </div>
+      <button class="btn ghost small" id="reg-close">Close</button>
+    </div>
+    <div id="reg-stats" class="grid grid-4"></div>
+    <div id="reg-body" style="max-height:46vh;overflow:auto"></div>
+    <div class="dialog-foot"><a class="btn ghost" id="reg-csv" download>Export CSV</a></div>
+  </div>
+</dialog>
+
+<script type="module">
+import { api, session, requireSession, renderRail, startRailClock, fmtDate, fmtTime, esc, el, notify } from '/stage.js';
+
+let user = null;
+let view = 'overview';
+let sessions = [];
+let people = [];
+let overview = null;
+let editingId = null;
+
+const stateLabel = { live: 'On air', scheduled: 'Scheduled', ended: 'Ended', draft: 'Draft', cancelled: 'Cancelled' };
+
+async function load() {
+  const [o, s, p] = await Promise.all([api('/admin/overview'), api('/admin/webinars'), api('/admin/people')]);
+  overview = o; sessions = s.webinars; people = p.people;
+  el('c-sessions').textContent = sessions.length || '';
+  el('c-people').textContent = people.filter((x) => x.role === 'user').length || '';
+  renderRail(el('rail'), sessions, { label: 'Schedule' });
+  render();
+}
+
+/* ---------- views ---------- */
+
+function overviewView() {
+  const c = overview.counts;
+  const stat = (label, value, small) =>
+    `<div class="stat"><div class="eyebrow">${label}</div><div class="value${small ? ' small' : ''}">${value}</div></div>`;
+
+  const todayRows = overview.today.length
+    ? overview.today.map(sessionRow).join('')
+    : `<div class="empty"><strong>Nothing on air today</strong><span>The schedule is clear. Good day to write next month\u2019s run of show.</span>
+       <button class="btn ghost" data-new>Schedule a session</button></div>`;
+
+  return `
+    <div class="grid grid-4" style="margin-bottom:22px">
+      ${stat('On air now', c.live)}
+      ${stat('Upcoming', c.upcoming)}
+      ${stat('Registrations', c.registrations)}
+      ${stat('Show rate', `${c.showRate}%`)}
+    </div>
+    <h2 style="margin-bottom:12px">Today\u2019s run of show</h2>
+    <div class="grid" style="margin-bottom:26px">${todayRows}</div>
+    <h2 style="margin-bottom:12px">Recently finished</h2>
+    <div class="grid">${overview.recent.length
+      ? overview.recent.map(sessionRow).join('')
+      : '<div class="empty"><strong>No finished sessions yet</strong><span>Attendance numbers land here after the first one wraps.</span></div>'}</div>`;
+}
+
+function sessionRow(w) {
+  const s = w.stats;
+  return `
+    <article class="card" data-state="${w.state}">
+      <div class="row-between">
+        <h3>${esc(w.title)}</h3>
+        <span class="badge" data-state="${w.state}">${stateLabel[w.state]}</span>
+      </div>
+      <div class="meta">
+        <span>${fmtDate(w.startsAt)} · ${fmtTime(w.startsAt)}</span>
+        <span>${w.durationMin} min</span>
+        <span>${esc(w.host)}</span>
+        <span>${s.registered} registered${w.capacity ? ` / ${w.capacity}` : ''}</span>
+        ${w.state === 'ended' ? `<span>${s.attended} attended · ${s.attendanceRate}% show rate</span>` : ''}
+      </div>
+      <div class="row">
+        <button class="btn ghost small" data-edit="${w.id}">Edit</button>
+        <button class="btn ghost small" data-registrants="${w.id}">Registrants (${s.registered})</button>
+        ${w.status === 'draft' ? `<button class="btn small" data-publish="${w.id}">Publish</button>` : ''}
+        <button class="btn danger small" data-delete="${w.id}">Delete</button>
+      </div>
+    </article>`;
+}
+
+function peopleView() {
+  if (!people.length) return '<div class="empty"><strong>No accounts yet</strong><span>People appear here after they sign up.</span></div>';
+  return `<div class="panel"><table>
+    <thead><tr><th>Name</th><th>Email</th><th>Company</th><th>Registered</th><th>Attended</th><th>Role</th></tr></thead>
+    <tbody>${people.map((p) => `<tr>
+      <td>${esc(p.name)}</td><td class="mono">${esc(p.email)}</td><td>${esc(p.company) || '—'}</td>
+      <td>${p.registrations}</td><td>${p.attended}</td>
+      <td><span class="badge" data-state="${p.role === 'admin' ? 'draft' : 'scheduled'}">${p.role}</span></td>
+    </tr>`).join('')}</tbody></table></div>`;
+}
+
+function render() {
+  const heads = { overview: ['Control room', 'Today'], sessions: ['Sessions', 'Everything scheduled'], people: ['People', 'Who\u2019s signed up'] };
+  el('crumb').textContent = heads[view][0];
+  el('title').textContent = heads[view][1];
+
+  if (view === 'overview') el('body').innerHTML = overviewView();
+  else if (view === 'people') el('body').innerHTML = peopleView();
+  else el('body').innerHTML = sessions.length
+    ? `<div class="grid">${sessions.map(sessionRow).join('')}</div>`
+    : `<div class="empty"><strong>No sessions yet</strong><span>Schedule the first one and it appears on the rail above.</span>
+       <button class="btn" data-new>Schedule a session</button></div>`;
+}
+
+/* ---------- editor ---------- */
+
+const toLocalInput = (iso) => {
+  const d = new Date(iso);
+  d.setMinutes(d.getMinutes() - d.getTimezoneOffset());
+  return d.toISOString().slice(0, 16);
+};
+
+function openEditor(w) {
+  editingId = w?.id || null;
+  el('editor-eyebrow').textContent = w ? 'Edit session' : 'New session';
+  el('editor-title').textContent = w ? w.title : 'Schedule a session';
+  el('f-title').value = w?.title || '';
+  el('f-description').value = w?.description || '';
+  el('f-host').value = w?.host || user.name;
+  el('f-tags').value = (w?.tags || []).join(', ');
+  el('f-startsAt').value = toLocalInput(w?.startsAt || new Date(Date.now() + 86400000).toISOString());
+  el('f-durationMin').value = w?.durationMin || 60;
+  el('f-capacity').value = w?.capacity ?? '';
+  el('f-status').value = w?.status || 'draft';
+  el('f-joinUrl').value = w?.joinUrl || '';
+  el('f-recordingUrl').value = w?.recordingUrl || '';
+  notify(el('editor-alert'), '');
+  el('editor').showModal();
+}
+
+el('editor-save').onclick = async () => {
+  const body = {
+    title: el('f-title').value,
+    description: el('f-description').value,
+    host: el('f-host').value,
+    tags: el('f-tags').value,
+    startsAt: el('f-startsAt').value ? new Date(el('f-startsAt').value).toISOString() : '',
+    durationMin: el('f-durationMin').value,
+    capacity: el('f-capacity').value === '' ? null : el('f-capacity').value,
+    status: el('f-status').value,
+    joinUrl: el('f-joinUrl').value,
+    recordingUrl: el('f-recordingUrl').value,
+  };
+  try {
+    if (editingId) await api(`/admin/webinars/${editingId}`, { method: 'PATCH', body });
+    else await api('/admin/webinars', { method: 'POST', body });
+    el('editor').close();
+    await load();
+  } catch (err) {
+    notify(el('editor-alert'), err.message);
+  }
+};
+
+el('editor-cancel').onclick = () => el('editor').close();
+
+/* ---------- registrants ---------- */
+
+async function openRegistrants(id) {
+  const w = sessions.find((x) => x.id === id);
+  const { registrants, stats } = await api(`/admin/webinars/${id}/registrants`);
+  el('reg-title').textContent = w.title;
+  el('reg-csv').href = `/api/admin/webinars/${id}/registrants.csv`;
+  el('reg-stats').innerHTML = [
+    ['Registered', stats.registered], ['Attended', stats.attended],
+    ['Show rate', `${stats.attendanceRate}%`], ['Avg watch', `${stats.avgWatchMin} min`],
+  ].map(([l, v]) => `<div class="stat"><div class="eyebrow">${l}</div><div class="value small">${v}</div></div>`).join('');
+
+  el('reg-body').innerHTML = registrants.length
+    ? `<table><thead><tr><th>Name</th><th>Email</th><th>Company</th><th>Attended</th><th>Watched</th></tr></thead>
+       <tbody>${registrants.map((r) => `<tr>
+         <td>${esc(r.name)}</td><td class="mono">${esc(r.email)}</td><td>${esc(r.company) || '—'}</td>
+         <td>${r.attended ? 'Yes' : 'No'}</td><td>${r.watchedMin} min</td></tr>`).join('')}</tbody></table>`
+    : '<div class="empty"><strong>No one registered yet</strong><span>Share the session link to start filling seats.</span></div>';
+
+  el('registrants').showModal();
+}
+
+el('reg-close').onclick = () => el('registrants').close();
+
+/* CSV needs the auth header, so fetch it as a blob rather than a plain link. */
+el('reg-csv').onclick = async (e) => {
+  e.preventDefault();
+  const res = await fetch(el('reg-csv').href, { headers: { Authorization: `Bearer ${session.token}` } });
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const a = Object.assign(document.createElement('a'), { href: url, download: 'registrants.csv' });
+  a.click();
+  URL.revokeObjectURL(url);
+};
+
+/* ---------- events ---------- */
+
+document.body.addEventListener('click', async (e) => {
+  const btn = e.target.closest('button');
+  if (!btn) return;
+  try {
+    if (btn.id === 'new-session' || btn.hasAttribute('data-new')) return openEditor(null);
+    if (btn.dataset.edit) return openEditor(sessions.find((w) => w.id === btn.dataset.edit));
+    if (btn.dataset.registrants) return openRegistrants(btn.dataset.registrants);
+    if (btn.dataset.publish) {
+      await api(`/admin/webinars/${btn.dataset.publish}`, { method: 'PATCH', body: { status: 'scheduled' } });
+      notify(el('alert'), 'Published. It\u2019s now open for registration.', 'ok');
+      return load();
+    }
+    if (btn.dataset.delete) {
+      const w = sessions.find((x) => x.id === btn.dataset.delete);
+      if (!confirm(`Delete "${w.title}"? Its registrations go too. This can\u2019t be undone.`)) return;
+      await api(`/admin/webinars/${w.id}`, { method: 'DELETE' });
+      return load();
+    }
+  } catch (err) {
+    notify(el('alert'), err.message);
+  }
+});
+
+el('nav').addEventListener('click', (e) => {
+  const btn = e.target.closest('button');
+  if (!btn) return;
+  view = btn.dataset.view;
+  document.querySelectorAll('#nav button').forEach((b) => b.setAttribute('aria-current', String(b.dataset.view === view)));
+  render();
+});
+
+el('signout').onclick = () => session.signOut();
+
+/* ---------- boot ---------- */
+
+user = await requireSession({ admin: true });
+if (user) {
+  el('who-name').textContent = user.name;
+  await load();
+  startRailClock(() => renderRail(el('rail'), sessions, { label: 'Schedule' }));
+  setInterval(load, 60_000);
+}
+</script>
+</body>
+</html>
