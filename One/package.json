@@ -1,0 +1,33 @@
+{
+  "name": "nfc-identity-platform",
+  "version": "0.4.0",
+  "private": true,
+  "description": "Secure NFC digital identity platform — Prisma data layer",
+  "type": "module",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "prisma": "node tools/prisma-guard.mjs",
+    "db:migrate": "node tools/prisma-guard.mjs migrate deploy",
+    "db:status": "node tools/prisma-guard.mjs migrate status",
+    "db:seed": "tsx prisma/seed.ts",
+    "prisma:generate": "node tools/prisma-guard.mjs generate",
+    "prisma:generate-schema": "node tools/generate-prisma-schema.mjs",
+    "check:schema": "node tools/check-schema.mjs",
+    "check:seed": "node tools/check-seed.mjs",
+    "check:types": "tsc --noEmit",
+    "check": "npm run check:schema && npm run check:seed",
+    "verify:sql": "bash ../nfc-identity/sql/run.sh"
+  },
+  "dependencies": {
+    "@node-rs/argon2": "^2.0.2",
+    "@prisma/client": "^6.19.3",
+    "pg": "^8.22.0"
+  },
+  "devDependencies": {
+    "@mrleebo/prisma-ast": "^0.12.1",
+    "@types/node": "^22.0.0",
+    "prisma": "^6.19.3",
+    "tsx": "^4.19.0",
+    "typescript": "^5.9.3"
+  }
+}
